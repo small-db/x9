@@ -38,13 +38,13 @@
 #include <stdbool.h> /* bool */
 #include <stdint.h>  /* uint64_t */
 #include <stdio.h>   /* printf */
-#include <stdlib.h>  /* rand, RAND_MAX */
+#include <stdlib.h>  /* EXIT_SUCCESS */
 
 #include "../x9.h"
 
 /* Both producer and consumer loops, would commonly be infinite loops, but for
  * the purpose of testing a reasonable NUMBER_OF_MESSAGES is defined. */
-#define NUMBER_OF_MESSAGES 50
+#define NUMBER_OF_MESSAGES 100 * 10000
 
 #define NUMBER_OF_PRODUCER_THREADS 3
 
@@ -58,10 +58,6 @@ typedef struct {
   uint64_t v;
 } msg;
 
-static inline int random_int(int const min, int const max) {
-  return min + rand() / (RAND_MAX / (max - min + 1) + 1);
-}
-
 static void* producer_fn(void* args) {
   th_struct* data = (th_struct*)args;
 
@@ -70,6 +66,7 @@ static void* producer_fn(void* args) {
        v += NUMBER_OF_PRODUCER_THREADS) {
     m.v = v;
     x9_write_to_inbox_spin_withid(data->inbox, v, sizeof(msg), &m);
+    // printf("Producer wrote: %ld\n", m.v);
   }
   printf("Producer done\n");
   return 0;
@@ -79,9 +76,12 @@ static void* consumer_fn(void* args) {
   th_struct* data = (th_struct*)args;
 
   msg m = {0};
+  uint64_t prev = -1;
   for (;;) {
     if (x9_read_from_shared_inbox(data->inbox, sizeof(msg), &m)) {
-      printf("Consumer read: %ld\n", m.v);
+      // printf("Consumer read: %ld\n", m.v);
+      assert(m.v - prev == 1);
+      prev = m.v;
       ++data->msgs_read;
       if (m.v == NUMBER_OF_MESSAGES - 1) {
         printf("Consumer done\n");
@@ -92,39 +92,38 @@ static void* consumer_fn(void* args) {
 }
 
 int main(void) {
-  /* Seed random generator */
-  srand((uint32_t)time(0));
-
   /* Create inbox */
-  x9_inbox* const inbox = x9_create_inbox(4, "ibx", sizeof(msg));
+  x9_inbox* const inbox = x9_create_inbox(100, "ibx", sizeof(msg));
 
   /* Using assert to simplify code for presentation purpose. */
   assert(x9_inbox_is_valid(inbox));
 
   /* Producers */
-  pthread_t producer_1_th = {0};
-  th_struct producer_1_struct = {.inbox = inbox, .producer_id = 0};
+  struct producer {
+    pthread_t th;
+    th_struct data;
+  } producers[NUMBER_OF_PRODUCER_THREADS];
 
-  pthread_t producer_2_th = {0};
-  th_struct producer_2_struct = {.inbox = inbox, .producer_id = 1};
-
-  pthread_t producer_3_th = {0};
-  th_struct producer_3_struct = {.inbox = inbox, .producer_id = 2};
+  // init producer list
+  for (int i = 0; i < NUMBER_OF_PRODUCER_THREADS; ++i) {
+    producers[i].data.inbox = inbox;
+    producers[i].data.producer_id = i;
+  }
 
   /* Consumers */
   pthread_t consumer_1_th = {0};
   th_struct consumer_1_struct = {.inbox = inbox};
 
   /* Launch threads */
-  pthread_create(&producer_1_th, NULL, producer_fn, &producer_1_struct);
-  pthread_create(&producer_2_th, NULL, producer_fn, &producer_2_struct);
-  pthread_create(&producer_3_th, NULL, producer_fn, &producer_3_struct);
+  for (int i = 0; i < NUMBER_OF_PRODUCER_THREADS; ++i) {
+    pthread_create(&producers[i].th, NULL, producer_fn, &producers[i].data);
+  }
   pthread_create(&consumer_1_th, NULL, consumer_fn, &consumer_1_struct);
 
   /* Join them */
-  pthread_join(producer_1_th, NULL);
-  pthread_join(producer_2_th, NULL);
-  pthread_join(producer_3_th, NULL);
+  for (int i = 0; i < NUMBER_OF_PRODUCER_THREADS; ++i) {
+    pthread_join(producers[i].th, NULL);
+  }
   pthread_join(consumer_1_th, NULL);
 
   /* Assert that all of the consumers read from the shared inbox. */

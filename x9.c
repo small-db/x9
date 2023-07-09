@@ -342,15 +342,19 @@ void x9_write_to_inbox_spin_withid(x9_inbox* const inbox, uint64_t const id,
                                    uint64_t const msg_sz,
                                    void const* restrict const msg) {
   for (;;) {
-    bool f = false;
-    register uint64_t const idx = id % inbox->sz;
-    register x9_msg_header* const header = x9_header_ptr(inbox, idx);
-    if (atomic_compare_exchange_weak_explicit(&header->slot_has_data, &f, true,
-                                              __ATOMIC_ACQUIRE,
-                                              __ATOMIC_RELAXED)) {
-      memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
-      atomic_store_explicit(&header->msg_written, true, __ATOMIC_RELEASE);
-      break;
+    // do a fuzzy check if the id not exceeds the read_idx by more than the
+    // inbox size
+    if (id < inbox->read_idx + inbox->sz) {
+      bool f = false;
+      register uint64_t const idx = id % inbox->sz;
+      register x9_msg_header* const header = x9_header_ptr(inbox, idx);
+      if (atomic_compare_exchange_weak_explicit(&header->slot_has_data, &f,
+                                                true, __ATOMIC_ACQUIRE,
+                                                __ATOMIC_RELAXED)) {
+        memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
+        atomic_store_explicit(&header->msg_written, true, __ATOMIC_RELEASE);
+        break;
+      }
     }
   }
 }
