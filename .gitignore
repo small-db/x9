@@ -1,1 +1,8 @@
+# testing binaries
 X9_TEST_*
+
+# vscode
+.vscode
+
+# debug logs
+out

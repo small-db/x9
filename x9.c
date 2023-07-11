@@ -36,6 +36,7 @@
 
 #include <assert.h>    /* assert */
 #include <immintrin.h> /* _mm_pause */
+#include <pthread.h>   /* pthread_cond_wait */
 #include <stdarg.h>    /* va_* */
 #include <stdatomic.h> /* atomic_* */
 #include <stdbool.h>   /* bool */
@@ -56,6 +57,10 @@ static void x9_print_error_msg(char const* const error_msg) {
 }
 #endif
 
+/* --- Syncronization primitives --- */
+pthread_cond_t reader_proceed_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t reader_proceed_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /* --- Internal types --- */
 
 typedef struct {
@@ -63,6 +68,8 @@ typedef struct {
   _Atomic(bool) msg_written;
   _Atomic(bool) shared;
   char const pad[5];
+  pthread_cond_t reader_proceed_cond;
+  pthread_mutex_t reader_proceed_lock;
 } x9_msg_header;
 
 typedef struct x9_inbox_internal {
@@ -338,25 +345,93 @@ void x9_write_to_inbox_spin(x9_inbox* const inbox, uint64_t const msg_sz,
   }
 }
 
+// [USEFUL API]
 void x9_write_to_inbox_spin_withid(x9_inbox* const inbox, uint64_t const id,
                                    uint64_t const msg_sz,
                                    void const* restrict const msg) {
+  register uint64_t const idx = id % inbox->sz;
+
+  // TODO: check result
+  printf("--> [writer] [id: %ld] try to acquire lock\n", id);
+  pthread_mutex_lock(&reader_proceed_lock);
+  printf("--> [writer] [id: %ld] acquired lock\n", id);
+
+  while (id >= inbox->read_idx + inbox->sz) {
+    pthread_cond_wait(&reader_proceed_cond, &reader_proceed_lock);
+  }
+
+  bool f = false;
+  register x9_msg_header* const header = x9_header_ptr(inbox, idx);
+
   for (;;) {
-    // do a fuzzy check if the id not exceeds the read_idx by more than the
-    // inbox size
-    if (id < inbox->read_idx + inbox->sz) {
-      bool f = false;
-      register uint64_t const idx = id % inbox->sz;
-      register x9_msg_header* const header = x9_header_ptr(inbox, idx);
-      if (atomic_compare_exchange_weak_explicit(&header->slot_has_data, &f,
-                                                true, __ATOMIC_ACQUIRE,
-                                                __ATOMIC_RELAXED)) {
-        memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
-        atomic_store_explicit(&header->msg_written, true, __ATOMIC_RELEASE);
-        break;
-      }
+    if (atomic_compare_exchange_weak_explicit(&header->slot_has_data, &f, true,
+                                              __ATOMIC_ACQUIRE,
+                                              __ATOMIC_RELAXED)) {
+      memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
+      atomic_store_explicit(&header->msg_written, true, __ATOMIC_RELEASE);
+      printf("--> [writer] [id: %ld] write to [slot_%ld]\n", id, idx);
+      break;
+    } else {
+      printf(
+          "--> [writer] [id: %ld] failed to write data at [slot_%ld], waiting "
+          "for future reading\n",
+          id, idx);
+      pthread_cond_wait(&reader_proceed_cond, &reader_proceed_lock);
     }
   }
+
+  // if (atomic_compare_exchange_weak_explicit(&header->slot_has_data, &f, true,
+  //                                           __ATOMIC_ACQUIRE,
+  //                                           __ATOMIC_RELAXED)) {
+  //   memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
+  //   atomic_store_explicit(&header->msg_written, true, __ATOMIC_RELEASE);
+  //   printf("--> [writer] [id: %ld] set msg_written at [slot_%ld] to true\n",
+  //   id,
+  //          idx);
+  // } else {
+  //   // the slot has data, so we have to wait until the reader has read the
+  //   data bool t = true; while (atomic_compare_exchange_weak_explicit(
+  //       &header->slot_has_data, &f, true, __ATOMIC_ACQUIRE,
+  //       __ATOMIC_RELAXED)) {
+  //     pthread_cond_wait(&reader_proceed_cond, &reader_proceed_lock);
+  //   }
+
+  //   // memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
+  //   // atomic_store_explicit(&header->msg_written, true, __ATOMIC_RELEASE);
+  //   // printf("--> [writer] [id: %ld] set msg_written at [slot_%ld] to true
+  //   at
+  //   // the alternative branch\n", id,
+  //   //        idx);
+
+  //   // printf(
+  //   //     "--> [writer] [id: %ld] [slot_%ld] failed to write msg since slot
+  //   is
+  //   //     " "already occupied, 'slot_has_data' at [slot_%ld] is %d\n", id,
+  //   idx,
+  //   //     idx, atomic_load_explicit(&header->slot_has_data,
+  //   __ATOMIC_ACQUIRE));
+  //   // exit(1);
+  // }
+
+  pthread_mutex_unlock(&reader_proceed_lock);
+  printf("--> [writer] [id: %ld] released lock\n", id);
+
+  // for (;;) {
+  //   // do a fuzzy check if the id not exceeds the read_idx by more than the
+  //   // inbox size
+  //   if (id < inbox->read_idx + inbox->sz) {
+  //     bool f = false;
+  //     register uint64_t const idx = id % inbox->sz;
+  //     register x9_msg_header* const header = x9_header_ptr(inbox, idx);
+  //     if (atomic_compare_exchange_weak_explicit(&header->slot_has_data, &f,
+  //                                               true, __ATOMIC_ACQUIRE,
+  //                                               __ATOMIC_RELAXED)) {
+  //       memcpy((char*)header + sizeof(x9_msg_header), msg, msg_sz);
+  //       atomic_store_explicit(&header->msg_written, true,
+  //       __ATOMIC_RELEASE); break;
+  //     }
+  //   }
+  // }
 }
 
 void x9_broadcast_msg_to_all_node_inboxes(x9_node const* const node,
@@ -402,21 +477,41 @@ void x9_read_from_inbox_spin(x9_inbox* const inbox, uint64_t const msg_sz,
   }
 }
 
+// [USEFUL API]
 bool x9_read_from_shared_inbox(x9_inbox* const inbox, uint64_t const msg_sz,
                                void* restrict const outparam) {
   bool f = false;
   register uint64_t const idx = x9_load_idx(inbox, true);
   register x9_msg_header* const header = x9_header_ptr(inbox, idx);
 
+  // printf("read-check-1\n");
   if (atomic_compare_exchange_strong_explicit(
           &header->shared, &f, true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+    // printf("read-check-2\n");
     if (atomic_load_explicit(&header->slot_has_data, __ATOMIC_RELAXED)) {
+      // printf("read-check-3\n");
+      // this check failed
       if (atomic_load_explicit(&header->msg_written, __ATOMIC_ACQUIRE)) {
+        // printf("read-check-4\n");
         memcpy(outparam, (char*)header + sizeof(x9_msg_header), msg_sz);
         atomic_fetch_add_explicit(&inbox->read_idx, 1, __ATOMIC_RELEASE);
+
         atomic_store_explicit(&header->msg_written, false, __ATOMIC_RELAXED);
+        printf("[reader] set msg_written in [slot_%ld] to false\n", idx);
+
         atomic_store_explicit(&header->slot_has_data, false, __ATOMIC_RELEASE);
         atomic_store_explicit(&header->shared, false, __ATOMIC_RELEASE);
+
+        printf("[reader] try to acquire lock\n");
+        pthread_mutex_lock(&reader_proceed_lock);
+        printf("[reader] acquired lock\n");
+
+        // pthread_cond_signal(&reader_proceed_cond);
+        pthread_cond_broadcast(&reader_proceed_cond);
+
+        pthread_mutex_unlock(&reader_proceed_lock);
+        printf("[reader] released lock\n");
+
         return true;
       }
     }

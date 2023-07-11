@@ -66,9 +66,9 @@ static void* producer_fn(void* args) {
        v += NUMBER_OF_PRODUCER_THREADS) {
     m.v = v;
     x9_write_to_inbox_spin_withid(data->inbox, v, sizeof(msg), &m);
-    // printf("Producer wrote: %ld\n", m.v);
+    printf("--> [writer] Producer wrote: %ld\n", m.v);
   }
-  printf("Producer done\n");
+  printf("--> [writer] Producer done\n");
   return 0;
 }
 
@@ -79,12 +79,12 @@ static void* consumer_fn(void* args) {
   uint64_t prev = -1;
   for (;;) {
     if (x9_read_from_shared_inbox(data->inbox, sizeof(msg), &m)) {
-      // printf("Consumer read: %ld\n", m.v);
+      printf("[reader] Consumer read: %ld\n", m.v);
       assert(m.v - prev == 1);
       prev = m.v;
       ++data->msgs_read;
       if (m.v == NUMBER_OF_MESSAGES - 1) {
-        printf("Consumer done\n");
+        printf("[reader] Consumer done\n");
         return 0;
       }
     }
@@ -93,7 +93,7 @@ static void* consumer_fn(void* args) {
 
 int main(void) {
   /* Create inbox */
-  x9_inbox* const inbox = x9_create_inbox(100, "ibx", sizeof(msg));
+  x9_inbox* const inbox = x9_create_inbox(4, "ibx", sizeof(msg));
 
   /* Using assert to simplify code for presentation purpose. */
   assert(x9_inbox_is_valid(inbox));
