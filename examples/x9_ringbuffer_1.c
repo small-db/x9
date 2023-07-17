@@ -1,36 +1,32 @@
-/* x9_example_5.c
+/* x9_ringbuffer_1.c
  *
- *  Three producers.
- *  Three consumers reading concurrently from the same inbox.
+ *  N producers.
+ *  One consumers reading concurrently from the same inbox.
  *  One message type.
  *
- *                                    ┌────────┐
- *  ┌────────┐       ┏━━━━━━━━┓    ─ ─│Consumer│
- *  │Producer│──────▷┃        ┃   │   └────────┘
- *  ├────────┤       ┃        ┃       ┌────────┐
- *  │Producer│──────▷┃ inbox  ┃◁──┤─ ─│Consumer│
- *  ├────────┤       ┃        ┃       └────────┘
- *  │Producer│──────▷┃        ┃   │   ┌────────┐
- *  └────────┘       ┗━━━━━━━━┛    ─ ─│Consumer│
- *                                    └────────┘
  *
- *  This example showcases the use of 'x9_read_from_shared_inbox'.
+ *  ┌────────┐       ┏━━━━━━━━┓
+ *  │Producer│──────▷┃        ┃
+ *  ├────────┤       ┃        ┃       ┌────────┐
+ *  │Producer│──────▷┃ inbox  ┃◁ ─ ─ ─│Consumer│
+ *  ├────────┤       ┃        ┃       └────────┘
+ *  │Producer│──────▷┃        ┃
+ *  └────────┘       ┗━━━━━━━━┛
+ *
+ *
+ *  This example showcases the use of 'ring_buffer'.
  *
  *  Data structures used:
- *   - x9_inbox
+ *   - rb_inbox
  *
  *  Functions used:
- *   - x9_create_inbox
- *   - x9_inbox_is_valid
- *   - x9_write_to_inbox_spin
- *   - x9_read_from_shared_inbox
- *   - x9_free_inbox
+ *   - write
+ *   - read
  *
  *  Test is considered passed iff:
  *   - None of the threads stall and exit cleanly after doing the work.
  *   - All messages sent by the producer(s) are received and asserted to be
  *   valid by the consumer(s).
- *   - Each consumer processes at least one message.
  */
 
 #include <assert.h>  /* assert */
@@ -40,7 +36,7 @@
 #include <stdio.h>   /* printf */
 #include <stdlib.h>  /* EXIT_SUCCESS */
 
-#include "../x9.h"
+#include "../rb.h"
 
 /* Both producer and consumer loops, would commonly be infinite loops, but for
  * the purpose of testing a reasonable NUMBER_OF_MESSAGES is defined. */
@@ -49,7 +45,7 @@
 #define NUMBER_OF_PRODUCER_THREADS 3
 
 typedef struct {
-  x9_inbox* inbox;
+  rb_inbox* inbox;
   uint64_t msgs_read;
   uint8_t producer_id;
 } th_struct;
@@ -65,10 +61,8 @@ static void* producer_fn(void* args) {
   for (uint64_t v = data->producer_id; v < NUMBER_OF_MESSAGES;
        v += NUMBER_OF_PRODUCER_THREADS) {
     m.v = v;
-    x9_write_to_inbox_spin_withid(data->inbox, v, sizeof(msg), &m);
-    printf("--> [writer] Producer wrote: %ld\n", m.v);
+    write(data->inbox, v, sizeof(msg), &m);
   }
-  printf("--> [writer] Producer done\n");
   return 0;
 }
 
@@ -78,13 +72,11 @@ static void* consumer_fn(void* args) {
   msg m = {0};
   uint64_t prev = -1;
   for (;;) {
-    if (x9_read_from_shared_inbox(data->inbox, sizeof(msg), &m)) {
-      printf("[reader] Consumer read: %ld\n", m.v);
+    if (read(data->inbox, sizeof(msg), &m)) {
       assert(m.v - prev == 1);
       prev = m.v;
       ++data->msgs_read;
       if (m.v == NUMBER_OF_MESSAGES - 1) {
-        printf("[reader] Consumer done\n");
         return 0;
       }
     }
@@ -93,7 +85,7 @@ static void* consumer_fn(void* args) {
 
 int main(void) {
   /* Create inbox */
-  x9_inbox* const inbox = x9_create_inbox(4, "ibx", sizeof(msg));
+  rb_inbox* const inbox = x9_create_inbox(4, "ibx", sizeof(msg));
 
   /* Using assert to simplify code for presentation purpose. */
   assert(x9_inbox_is_valid(inbox));
